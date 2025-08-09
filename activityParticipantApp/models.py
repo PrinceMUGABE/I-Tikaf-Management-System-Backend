@@ -1,4 +1,3 @@
-# activityParticipantApp/models.py
 from django.db import models
 from django.utils.timezone import now
 from django.core.exceptions import ValidationError
@@ -41,10 +40,12 @@ class ActivityParticipant(models.Model):
         verbose_name = 'Activity Participant'
         verbose_name_plural = 'Activity Participants'
         ordering = ['-created_at']
-        unique_together = ['activity', 'user']
+        # Remove unique_together constraint to allow re-registration
+        # unique_together = ['activity', 'user']  # Comment out or remove this line
         indexes = [
             models.Index(fields=['activity', 'participation_status']),
             models.Index(fields=['user', 'registration_date']),
+            models.Index(fields=['activity', 'user', 'participation_status']),  # Add this for better querying
         ]
 
     def __str__(self):
@@ -75,7 +76,7 @@ class ActivityParticipant(models.Model):
         elif not self.user.is_active:
             errors['user'] = 'Cannot register inactive users for activities.'
 
-        # Validate user role - only christians and ministry leaders can participate
+        # Validate user role - only participants and imams can participate
         if self.user and self.user.role not in ['imam', 'participant']:
             errors['user'] = 'Only Participants and Imam can participate in activities.'
 
@@ -84,7 +85,22 @@ class ActivityParticipant(models.Model):
             if self.participation_status == 'registered' and not self.pk:  # New registration
                 errors['activity'] = 'Cannot register for activities that have already started.'
 
-        # Validate participation status transitions
+        # Check for existing active registration (business logic constraint)
+        if self.activity and self.user and not self.pk:  # New registration
+            existing_registration = ActivityParticipant.objects.filter(
+                activity=self.activity,
+                user=self.user,
+                participation_status__in=['registered', 'attended'],  # Active statuses
+                is_active=True
+            ).first()
+            
+            if existing_registration:
+                if existing_registration.participation_status == 'registered':
+                    errors['non_field_errors'] = 'User is already registered for this activity.'
+                elif existing_registration.participation_status == 'attended':
+                    errors['non_field_errors'] = 'User has already attended this activity.'
+
+        # Validate participation status transitions for updates
         if self.pk:  # Existing record
             try:
                 old_instance = ActivityParticipant.objects.get(pk=self.pk)

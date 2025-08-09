@@ -36,34 +36,59 @@ def handle_validation_error(error):
 def create_activity_participant(request):
     """Create a new activity participant"""
     try:
-        print("Creating activity participant with data:", request.data,  "\nUser:", request.user)
+        print("Creating activity participant with data:", request.data, "\nUser:", request.user)
+        
         with transaction.atomic():
             serializer = ActivityParticipantCreateSerializer(data=request.data)
             if serializer.is_valid():
                 participant = serializer.save()
                 response_serializer = ActivityParticipantDetailSerializer(participant)
+                
+                # Determine if this was a re-registration
+                action = "re-registered" if hasattr(serializer, 'instance') and serializer.instance else "registered"
+                
+                # Get updated activity info to show remaining spots
+                activity = participant.activity
+                remaining_spots = activity.get_available_spots()
+                
                 return Response({
                     'success': True,
-                    'message': 'Activity registration successful',
-                    'data': response_serializer.data
+                    'message': f'Activity {action} successfully',
+                    'data': response_serializer.data,
+                    'activity_info': {
+                        'remaining_spots': remaining_spots,
+                        'is_full': activity.is_full(),
+                        'total_required': activity.required_participants
+                    }
                 }, status=status.HTTP_201_CREATED)
             else:
-                print(f"\n Validation Failed {serializer.errors}\n")
+                print(f"\nValidation Failed {serializer.errors}\n")
+                
+                # Check if the error is specifically about activity being full
+                activity_errors = serializer.errors.get('activity', [])
+                if any('full' in str(error).lower() for error in activity_errors):
+                    return Response({
+                        'success': False,
+                        'message': 'Activity is full',
+                        'errors': serializer.errors
+                    }, status=status.HTTP_409_CONFLICT)  # Conflict status for full activity
+                
                 return Response({
                     'success': False,
                     'message': 'Validation failed',
                     'errors': serializer.errors
                 }, status=status.HTTP_400_BAD_REQUEST)
+                
     except DjangoValidationError as e:
-        print(f"Registration Failed:\t {handle_validation_error}\n")
+        print(f"Registration Failed: {e}\n")
         return Response({
-            
             'success': False,
             'message': 'Registration failed',
             'errors': handle_validation_error(e)
         }, status=status.HTTP_400_BAD_REQUEST)
+        
     except Exception as e:
-        print(f"An exepected error occures: \t {e}\n")
+        print(f"An unexpected error occurred: {e}\n")
         return Response({
             'success': False,
             'message': 'An unexpected error occurred',

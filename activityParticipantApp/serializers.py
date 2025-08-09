@@ -16,6 +16,10 @@ class CustomUserSerializer(serializers.ModelSerializer):
 
 class ActivitySerializer(serializers.ModelSerializer):
     created_by = CustomUserSerializer(read_only=True)
+    registered_count = serializers.SerializerMethodField()
+    available_spots = serializers.SerializerMethodField()
+    is_full = serializers.SerializerMethodField()
+    can_register = serializers.SerializerMethodField()
     
     class Meta:
         model = Activity
@@ -28,6 +32,11 @@ class ActivitySerializer(serializers.ModelSerializer):
             'end_datetime',
             'description',
             'image',
+            'required_participants',
+            'registered_count',
+            'available_spots',
+            'is_full',
+            'can_register',
             'created_by',
             'created_at',
             'updated_at',
@@ -35,6 +44,21 @@ class ActivitySerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['created_by', 'created_at', 'updated_at']
 
+    def get_registered_count(self, obj):
+        """Get current registered participant count"""
+        return obj.get_registered_count()
+    
+    def get_available_spots(self, obj):
+        """Get available spots remaining"""
+        return obj.get_available_spots()
+    
+    def get_is_full(self, obj):
+        """Check if activity is full"""
+        return obj.is_full()
+    
+    def get_can_register(self, obj):
+        """Check if registration is still open"""
+        return obj.can_register()
 
 
 class ActivityParticipantListSerializer(serializers.ModelSerializer):
@@ -95,6 +119,18 @@ class ActivityParticipantCreateSerializer(serializers.ModelSerializer):
         if value.start_datetime <= now():
             raise serializers.ValidationError("Cannot register for activities that have already started.")
         
+        # Check if activity has reached maximum participants
+        current_registered_count = ActivityParticipant.objects.filter(
+            activity=value,
+            participation_status='registered',  # Only count registered participants
+            is_active=True
+        ).count()
+        
+        if current_registered_count >= value.required_participants:
+            raise serializers.ValidationError(
+                f"Activity is full. Maximum {value.required_participants} participants allowed."
+            )
+        
         return value
 
     def validate_user(self, value):
@@ -103,7 +139,7 @@ class ActivityParticipantCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Cannot register inactive users for activities.")
         
         if value.role not in ['participant', 'imam']:
-            raise serializers.ValidationError("Only particicpants and Imam can participate in activities.")
+            raise serializers.ValidationError("Only participants and Imam can participate in activities.")
         
         return value
 
@@ -113,24 +149,85 @@ class ActivityParticipantCreateSerializer(serializers.ModelSerializer):
         user = attrs.get('user')
         
         if activity and user:
-            # Check if user already registered for this activity
-            if ActivityParticipant.objects.filter(activity=activity, user=user, is_active=True).exists():
-                raise serializers.ValidationError("User is already registered for this activity.")
+            # Check for existing active registration
+            existing_registration = ActivityParticipant.objects.filter(
+                activity=activity,
+                user=user,
+                participation_status__in=['registered', 'attended'],  # Only check active statuses
+                is_active=True
+            ).first()
+            
+            if existing_registration:
+                if existing_registration.participation_status == 'registered':
+                    raise serializers.ValidationError("User is already registered for this activity.")
+                elif existing_registration.participation_status == 'attended':
+                    raise serializers.ValidationError("User has already attended this activity.")
+            
+            # Check if user has cancelled registration and wants to re-register
+            cancelled_registration = ActivityParticipant.objects.filter(
+                activity=activity,
+                user=user,
+                participation_status__in=['cancelled', 'no_show'],
+                is_active=True
+            ).first()
+            
+            if cancelled_registration:
+                # For re-registration, double-check the participant limit
+                # (excluding the cancelled registration that will be updated)
+                current_registered_count = ActivityParticipant.objects.filter(
+                    activity=activity,
+                    participation_status='registered',
+                    is_active=True
+                ).exclude(id=cancelled_registration.id).count()
+                
+                if current_registered_count >= activity.required_participants:
+                    raise serializers.ValidationError(
+                        f"Cannot re-register. Activity is full. Maximum {activity.required_participants} participants allowed."
+                    )
+                
+                # Update the existing cancelled/no_show registration instead of creating new one
+                self.instance = cancelled_registration
         
         return attrs
 
     def create(self, validated_data):
         """Create activity participant with proper error handling"""
         try:
-            return super().create(validated_data)
+            # If we have an existing cancelled/no_show registration, update it instead
+            if hasattr(self, 'instance') and self.instance:
+                # Update existing registration
+                self.instance.participation_status = validated_data.get('participation_status', 'registered')
+                self.instance.notes = validated_data.get('notes', '')
+                self.instance.registration_date = now()
+                self.instance.save()
+                return self.instance
+            else:
+                # Final check before creating new registration (race condition protection)
+                activity = validated_data['activity']
+                current_registered_count = ActivityParticipant.objects.filter(
+                    activity=activity,
+                    participation_status='registered',
+                    is_active=True
+                ).count()
+                
+                if current_registered_count >= activity.required_participants:
+                    raise serializers.ValidationError(
+                        f"Activity is full. Maximum {activity.required_participants} participants allowed."
+                    )
+                
+                # Create new registration
+                return super().create(validated_data)
         except DjangoValidationError as e:
             # Convert Django validation errors to DRF format
             if hasattr(e, 'message_dict'):
                 raise serializers.ValidationError(e.message_dict)
             else:
                 raise serializers.ValidationError(str(e))
-
-
+            
+            
+            
+            
+            
 class ActivityParticipantUpdateSerializer(serializers.ModelSerializer):
     """Serializer for updating activity participants"""
     

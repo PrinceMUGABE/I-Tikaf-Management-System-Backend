@@ -44,20 +44,47 @@ def create_activity(request):
 @permission_classes([permissions.AllowAny])
 def list_activities(request):
     """
-    Get all active activities (public access)
+    Get all active activities with participant information (public access)
     """
-    logger.info("Listing all active activities")
+    logger.info("Listing all active activities with participant data")
     try:
-        activities = Activity.objects.filter(is_active=True).order_by('start_datetime')
+        # Optimize query with prefetch_related to avoid N+1 queries
+        activities = Activity.objects.filter(
+            is_active=True
+        ).select_related(
+            'created_by'
+        ).prefetch_related(
+            'participants'
+        ).order_by('start_datetime')
+        
         serializer = ActivitySerializer(activities, many=True)
-        logger.info(f"Found {activities.count()} active activities")
-        return Response(serializer.data)
+        
+        # Optional: Add summary statistics
+        total_activities = activities.count()
+        full_activities = sum(1 for activity in activities if activity.is_full())
+        
+        logger.info(f"Found {total_activities} active activities, {full_activities} are full")
+        
+        return Response({
+            'success': True,
+            'message': 'Activities retrieved successfully',
+            'data': {
+                'activities': serializer.data,
+                'summary': {
+                    'total_activities': total_activities,
+                    'full_activities': full_activities,
+                    'available_activities': total_activities - full_activities
+                }
+            }
+        }, status=status.HTTP_200_OK)
+        
     except Exception as e:
         logger.error(f"Error listing activities: {str(e)}", exc_info=True)
-        return Response(
-            {'error': 'An error occurred while fetching activities'},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
+        return Response({
+            'success': False,
+            'message': 'An error occurred while fetching activities',
+            'errors': {'detail': str(e)}
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @api_view(['GET'])
 @permission_classes([permissions.AllowAny])
